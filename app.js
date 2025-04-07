@@ -18,31 +18,90 @@ const io = new Server(server, {
     origin: [
       process.env.CLIENT_URL_LOCAL,
       process.env.CLIENT_URL_PROD,
+      // Add wildcard for development and troubleshooting
+      '*',
     ],
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"],
   },
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000, // Increase ping timeout to 60 seconds
+  pingInterval: 25000, // Ping every 25 seconds
 });
 
 // Make socket.io instance available to routes
 app.set('io', io);
 
 // CORS Middleware
-const allowedOrigins = [process.env.CLIENT_URL_LOCAL, process.env.CLIENT_URL_PROD];
+const allowedOrigins = [
+  process.env.CLIENT_URL_LOCAL, 
+  process.env.CLIENT_URL_PROD,
+];
+
+// Add additional origins from environment variables
+if (process.env.ADDITIONAL_ORIGINS) {
+  const additionalOrigins = process.env.ADDITIONAL_ORIGINS.split(',').map(origin => {
+    // Convert domain patterns to full URLs or regex patterns
+    if (origin.startsWith('http')) return origin;
+    if (origin.includes('*')) return new RegExp(origin.replace('*', '.*'));
+    return `https://${origin}`;
+  });
+  allowedOrigins.push(...additionalOrigins);
+}
+
+// Also allow all origins in development
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push('*');
+}
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      // Allow requests with no origin (like mobile apps, curl requests)
+      if (!origin) {
+        return callback(null, true);
+      }
+      
+      // Check if origin is allowed
+      const isAllowed = 
+        allowedOrigins.includes(origin) || 
+        allowedOrigins.includes('*') ||
+        // Check against regex patterns
+        allowedOrigins.some(allowedOrigin => 
+          allowedOrigin instanceof RegExp && allowedOrigin.test(origin)
+        );
+      
+      if (isAllowed) {
         callback(null, true);
       } else {
+        console.log('CORS blocked for origin:', origin);
+        console.log('Allowed origins:', allowedOrigins);
         callback(new Error("Not allowed by CORS"));
       }
     },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"],
   })
 );
 
 app.use(express.json());
 app.use(cookieParser());
+
+// Debug route for socket testing
+app.get('/socket-test', (req, res) => {
+  res.send({ 
+    status: 'server_ok',
+    message: 'Socket.IO server is running',
+    socketConnectionCount: io.engine.clientsCount,
+    activeConnections: Object.keys(io.sockets.sockets).length,
+    onlineUsers
+  });
+});
+
+// Health check route for Render.com
+app.get('/', (req, res) => {
+  res.send('Campus Connect API is running');
+});
 
 // Routes
 app.use("/api/auth", authRoute);
@@ -61,6 +120,12 @@ const onlineUserMap = {};
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
+
+  // Respond to ping with pong for connection debugging
+  socket.on('ping', () => {
+    console.log('Received ping from client:', socket.id);
+    socket.emit('pong');
+  });
 
   // Add user to online users array
   const addUser = (userId) => {
@@ -83,6 +148,7 @@ io.on("connection", (socket) => {
 
   // New user connects
   socket.on("newUser", (userId) => {
+    console.log(`New user connected: ${userId} via socket ${socket.id}`);
     addUser(userId);
     onlineUserMap[socket.id] = userId;
     
@@ -151,6 +217,7 @@ io.on("connection", (socket) => {
 
   // Disconnect
   socket.on("disconnect", () => {
+    console.log("Socket disconnected:", socket.id);
     removeUser(socket.id);
     io.emit("getOnlineUsers", onlineUsers);
   });
@@ -160,4 +227,6 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 8800;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}!`);
+  console.log(`Socket.IO server is ready for connections`);
+  console.log(`CORS allowed origins: ${JSON.stringify(allowedOrigins)}`);
 });
